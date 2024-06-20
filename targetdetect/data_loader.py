@@ -5,10 +5,51 @@ import jsonlines
 import nltk
 import torch
 from nltk.stem import WordNetLemmatizer
-import inflect
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
+import numpy as np 
 from transformers import AutoTokenizer
+from collections import Counter
+from difflib import SequenceMatcher
+
+def longest_common_subsequence(seq1, seq2):
+    """
+    Calculate the length of the longest common subsequence between two sequences.
+    """
+    matcher = SequenceMatcher(None, seq1, seq2)
+    lcs = sum(match.size for match in matcher.get_matching_blocks())
+    return lcs
+
+def lcs_agreement(annotations, text_length):
+    """
+    Calculate the inter-annotator agreement using the Longest Common Subsequence (LCS) method.
+    annotations is a list of lists, where each inner list contains the spans annotated by one annotator.
+    text_length is the length of the text being annotated.
+    """
+    # Convert span annotations to binary sequence representations
+    binary_annotations = []
+    for annotator_spans in annotations:
+        binary_sequence = [0] * text_length
+        for start, end in annotator_spans:
+            for i in range(start, end):
+                binary_sequence[i] = 1
+        binary_annotations.append(binary_sequence)
+
+    # Calculate pairwise LCS agreement
+    pairwise_agreements = []
+    for i in range(len(binary_annotations)):
+        for j in range(i + 1, len(binary_annotations)):
+            lcs_length = longest_common_subsequence(binary_annotations[i], binary_annotations[j])
+            agreement = lcs_length / text_length
+            pairwise_agreements.append(agreement)
+
+    # Return the average agreement across all pairs
+    return sum(pairwise_agreements) / len(pairwise_agreements) if pairwise_agreements else 0
+
+
+
+
+
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 nltk.download('wordnet')
 
@@ -16,7 +57,7 @@ nltk.download('wordnet')
 lemmatizer = WordNetLemmatizer()
 
 
-p = inflect.engine()
+# p = inflect.engine()
 
 def unify_targets(target):
     target = str(target)
@@ -93,11 +134,46 @@ class TargetClassificationDataset(torch.utils.data.Dataset):
 
 
 
+class DynaHate:
+    def __init__(self, data_path = 'data/dynahate/'):
+        self.data_path = data_path
+        
+        
 
+
+
+
+    def get_hates_only(self,dataset):
+        hate_train_data = [data for data in dataset if data['hate'] == 1]
+        return hate_train_data
+    # def to_jsonl(self,dataset,output_path):
+    #     jsonl_list = []
+        
+    #     for i in range(len(dataset)):
+            
+    #         jsonl_list.append({'post':dataset[i]['post'],
+    #                            'hate':dataset[i]['hate'],
+    #                            })
+
+    #     with jsonlines.open(output_path,'w') as writer:
+    #         for i in range(len(jsonl_list)):
+    #             writer.write(jsonl_list[i])
+
+    def read_jsonl(self,input_path):
+        with jsonlines.open(input_path) as reader:
+            data = [obj for obj in reader]
+        return data
 
 class ImplicitHateCorpus:
     def __init__(self, data_path = 'data/implicit-hate-corpus/'):
         self.data_path = data_path
+        df = pd.read_csv(data_path+'implicit_hate_v1_stg3_posts.tsv',sep='\t',names = ['post','target','implied_statement'])
+        train_df = df.sample(frac=0.8, random_state=42)
+     
+        dev_test_df = df.drop(train_df.index)
+        dev_df = dev_test_df.sample(frac=0.5, random_state=42)
+        test_df = dev_test_df.drop(dev_df.index)
+       
         
         
     def get_targets(self,all_data_path='data/implicit-hate-corpus/implicit_hate_v1_stg3_posts.tsv'):
@@ -138,6 +214,58 @@ class ImplicitHateCorpus:
         print(lookup_map)
         num_classes = len(targets)
         return lookup_map,num_classes
+
+class SBIC:
+    def __init__(self, data_path = 'data/SBIC/'):
+        self.data_path = data_path
+        #read with pandas 
+       
+        self.train_data = self.read_jsonl('data/sbic/train.jsonl')
+        self.dev_data = self.read_jsonl('data/sbic/dev.jsonl')
+        self.test_data = self.read_jsonl('data/sbic/test.jsonl')
+        self.train_data = self.get_hates_only(self.train_data)
+        self.dev_data = self.get_hates_only(self.dev_data)
+        self.test_data = self.get_hates_only(self.test_data)
+        with jsonlines.open('data/sbic/train_hate.jsonl','w') as writer:
+            for i in range(len(self.train_data)):
+                writer.write(self.train_data[i])
+        with jsonlines.open('data/sbic/dev_hate.jsonl','w') as writer:
+            for i in range(len(self.dev_data)):
+                writer.write(self.dev_data[i])
+        with jsonlines.open('data/sbic/test_hate.jsonl','w') as writer:
+            for i in range(len(self.test_data)):
+                writer.write(self.test_data[i])
+
+
+    def to_jsonl(self,dataset,output_path):
+        jsonl_list = []
+        for i in range(len(dataset)):
+            jsonl_list.append({'post':dataset.iloc[i]['post'],
+                               'target':dataset.iloc[i]['targetMinority'],
+                               'offensive':dataset.iloc[i]['offensiveYN'],
+                               'implied_statement':dataset.iloc[i]['targetStereotype']})
+
+
+        with jsonlines.open(output_path,'w') as writer:
+            for i in range(len(jsonl_list)):
+                writer.write(jsonl_list[i])
+
+    def read_jsonl(self,input_path):
+        with jsonlines.open(input_path) as reader:
+            data = [obj for obj in reader]
+        return data
+    
+    def get_hates_only(self,dataset):
+        hate_dataset=[]
+        unique_posts = []
+
+        for data in dataset:
+            if data['offensive']>0.0:
+                if data['post'] in unique_posts:
+                    continue
+                unique_posts.append(data['post'])
+                hate_dataset.append(data)
+        return hate_dataset
 
 
 
@@ -241,15 +369,152 @@ class ClassificationDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.args.eval_batch_size, num_workers=1)
 
+def calculate_num_target_per_text(sample):
+    #calculate the number of targets per text
+    unique_targets = list(set(sample['targets']))
+    num_targets = len(unique_targets)
+    return num_targets
+
+def calculate_target_token_length(sample):
+    #calculate the length of the target
+    target_lengths = []
+    for target in sample['targets']:
+        target_length = len(target.split())
+        target_lengths.append(target_length)
+    return target_lengths
+
+def avg_target_token_length(dataset):
+    target_lengths = []
+    for sample in dataset:
+        target_lens= calculate_target_token_length(sample)
+        #avg target length per text
+        avg_target_length = np.mean(target_lens)
+        target_lengths.append(avg_target_length)
+    avg_target_length = np.mean(target_lengths)
+    stdev_target_length = np.std(target_lengths)
+    return avg_target_length,stdev_target_length
+
+
+def avg_num_targets_per_text(dataset):
+    num_targets = []
+    for sample in dataset:
+        num_targets.append(calculate_num_target_per_text(sample))
+    avg_num_targets = np.mean(num_targets)
+    stdev_num_targets = np.std(num_targets)
+    return avg_num_targets,stdev_num_targets
+
+
+
 
 
         
 
 
+def calculate_overlap(span1, span2):
+    """
+    Calculate the number of overlapping characters between two spans.
+    Each span is a tuple of (start, end).
+    """
+    return max(0, min(span1[1], span2[1]) - max(span1[0], span2[0]))
 
-        
+def calculate_agreement(annotations):
+    """
+    Calculate the agreement score between annotators with partial overlaps, including cases with empty annotations.
+    annotations is a list where each element is an annotator's list of spans.
+    """
+    # Pairwise comparison of annotators
+    pairwise_agreements = []
+    for i in range(len(annotations)):
+        for j in range(i+1, len(annotations)):
+            annotator1 = annotations[i]
+            annotator2 = annotations[j]
+            total_overlap = 0
+            total_chars = 0
+            
+            # Check each span in annotator1 against all spans in annotator2
+            for span1 in annotator1:
+                for span2 in annotator2:
+                    total_overlap += calculate_overlap(span1, span2)
+                
+                # Add the number of characters in the current span to the total
+                total_chars += span1[1] - span1[0]
+            
+            # Also add the characters from annotator2's spans that weren't considered
+            total_chars += sum(span2[1] - span2[0] for span2 in annotator2)
+            
+            # Handle cases where one or both annotators provided no annotations
+            if total_chars == 0:
+                agreement_score = 1.0 if not annotator1 and not annotator2 else 0.0
+            else:
+                agreement_score = total_overlap / total_chars
+            
+            # Add the agreement score for this pair of annotators to the list
+            pairwise_agreements.append(agreement_score)
+    
+    # Return the average agreement across all pairs
+    return sum(pairwise_agreements) / len(pairwise_agreements) if pairwise_agreements else 0
 
 
-        
-        
+
+
+def dice_coefficient(annotator1_spans, annotator2_spans):
+    """
+    Calculate the Dice Coefficient between two sets of spans from different annotators.
+    The Dice Coefficient is 2 * |X ∩ Y| / (|X| + |Y|),
+    where X and Y are sets of characters within the spans.
+    """
+    # If both annotators provided no annotations, consider it as a full agreement
+    if not annotator1_spans and not annotator2_spans:
+        return 1.0
+    
+    # Convert spans to sets of characters
+    chars_in_annotator1 = set()
+    for span in annotator1_spans:
+        chars_in_annotator1.update(range(span[0], span[1]))
+    
+    chars_in_annotator2 = set()
+    for span in annotator2_spans:
+        chars_in_annotator2.update(range(span[0], span[1]))
+
+    # Calculate intersection and union sizes
+    intersection = chars_in_annotator1.intersection(chars_in_annotator2)
+    union = chars_in_annotator1.union(chars_in_annotator2)
+
+    # Calculate Dice Coefficient
+    if len(union) == 0:  # Avoid division by zero
+        return 0.0  # If only one annotator has no annotations, it's a disagreement
+    else:
+        return (2 * len(intersection)) / (len(chars_in_annotator1) + len(chars_in_annotator2))
+
+
+def lcs_agreement_pairwise(annotations, text_length):
+    """
+    Calculate the inter-annotator agreement using the Longest Common Subsequence (LCS) method,
+    returning the score for each pair of annotators.
+    annotations is a list of lists, where each inner list contains the spans annotated by one annotator.
+    text_length is the length of the text being annotated.
+    """
+    # Convert span annotations to binary sequence representations
+    binary_annotations = []
+    for annotator_spans in annotations:
+        binary_sequence = [0] * text_length
+        for start, end in annotator_spans:
+            for i in range(start, end):
+                binary_sequence[i] = 1
+        binary_annotations.append(binary_sequence)
+
+    # Calculate pairwise LCS agreement
+    pairwise_agreements = {}
+    for i in range(len(binary_annotations)):
+        for j in range(i + 1, len(binary_annotations)):
+            lcs_length = longest_common_subsequence(binary_annotations[i], binary_annotations[j])
+            agreement = lcs_length / text_length
+            pairwise_agreements[f"Annotator {i+1} & Annotator {j+1}"] = agreement
+
+    return pairwise_agreements
+
+
+
+
+
 

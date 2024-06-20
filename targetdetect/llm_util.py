@@ -4,15 +4,53 @@ from tqdm import tqdm
 import numpy as np 
 import pandas as pd
 from fuzzywuzzy import fuzz
-os.environ['TRANSFORMERS_CACHE'] = '/work/nazaninjafar_umass_edu/'
+os.environ['TRANSFORMERS_CACHE'] = ''
 
 
 
+def parse_targets(outputs):
+    all_targets = []
+    for output in outputs:
+        print(output)
+        if 'Output:' in output:
+            targets = output.split('Output:')[1].strip()
+            targets = targets.split('\n')[0].strip()
+            targets = targets.replace('[','').replace(']','').replace('"','').replace("'",'').split(',')
+            #separate any target that has \n in it
+            for target in targets:
+                if '\n' in target:
+                    target = target.split('\n')[0].strip()
 
-def get_llm_engine(model_id = "meta-llama/Llama-2-13b-hf",download_dir = '/work/nazaninjafar_umass_edu/'):
+            targets = [target.strip() for target in targets]
+            all_targets.append(targets)
+        else:
+            #check if there is any string that looks like python list
+            if '[' in output and ']' in output:
+                targets = output.split('[')[1].split(']')[0].replace('"','').replace("'",'').split(',')
+                #separate any target that has \n in it
+                for target in targets:
+                    if '\n' in target:
+                        target = target.split('\n')[0].strip()
+                targets = [target.strip() for target in targets]
+                all_targets.append(targets)
+            else:
+                # check if there is a newline character
+                if '\n' in output:
+                    targets = output.split('\n')[0].strip()
+                    all_targets.append([targets])
+                else:
+                    all_targets.append([])
+    return all_targets
+
+            
+
+
+def get_llm_engine(model_id = "meta-llama/Llama-2-13b-hf",download_dir = ''):
     
     sampling_params = SamplingParams(temperature=0.0,max_tokens= 200)
-    llm = LLM(model=model_id,download_dir = download_dir)
+    #if model is mistral or falcon the gpu does not have compute capability so change the dtype to 'float16'
+
+    llm = LLM(model=model_id,download_dir = download_dir,dtype= 'float16',trust_remote_code=True)
 
     return llm, sampling_params
 

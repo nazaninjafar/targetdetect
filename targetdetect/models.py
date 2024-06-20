@@ -6,6 +6,57 @@ from torch import nn
 from transformers import AdamW
 import torchmetrics
 
+from llm_util import get_llm_engine
+import tqdm
+import jsonlines
+import openai
+# from openai import OpenAI
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+)  
+
+
+
+openai.api_key=""
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
+def completion_with_backoff(**kwargs):
+    return openai.ChatCompletion.create(**kwargs)
+class GPTInference:
+    def __init__(self,llm_model_name):
+        super().__init__()
+        self.model_engine = llm_model_name
+
+        # if self.llm_model_name =='gpt35':
+        #     self.model_engine = "gpt-3.5-turbo"
+        # elif self.llm_model_name =='gpt4':
+        #     self.model_engine = "gpt-4"
+
+    def get_model_predict(self,prompt):
+        
+        completion = completion_with_backoff(model = self.model_engine,
+                    messages = [{"role": "user", "content": prompt}],
+                    n=1,stop=None,temperature=0)
+        
+        return completion.choices[0].message.content
+
+class OpenLLMInference:
+    def __init__(self,llm_model_name):
+        super().__init__()
+        
+        # self.model_id = "meta-llama/Llama-2-13b-chat-hf"
+        self.model_id = llm_model_name 
+        self.llm, self.sampling_params = get_llm_engine(self.model_id)
+        
+
+    def get_model_predict(self,prompts):
+        outputs = self.llm.generate(prompts, self.sampling_params)
+
+        return [output_text.outputs[0].text for output_text in outputs]
+
 
 
 class TextClassificationModel(pl.LightningModule):
